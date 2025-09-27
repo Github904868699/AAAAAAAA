@@ -5,6 +5,42 @@
 # LICENSE file in the root directory of this source tree.
 import os
 
+
+def _ensure_default_cuda_arch():
+    """Ensure builds target the legacy sm_120 architecture by default.
+
+    PyTorch respects the ``TORCH_CUDA_ARCH_LIST`` environment variable when
+    generating the nvcc ``-gencode`` flags for both the wheel and any CUDA
+    extensions.  If the variable is not provided we set it explicitly so that
+    downstream build steps emit kernels for ``sm_120`` GPUs.
+    """
+
+    arch_list = os.getenv("TORCH_CUDA_ARCH_LIST")
+    if not arch_list:
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "1.2"
+        return "1.2"
+    return arch_list
+
+
+_TORCH_CUDA_ARCH_LIST = _ensure_default_cuda_arch()
+
+
+def _should_enable_sm120(arch_list: str) -> bool:
+    """Return True when the CUDA arch list requests sm_120 code generation."""
+
+    if not arch_list:
+        return False
+
+    normalized = []
+    for token in arch_list.replace(",", " ").split():
+        token = token.strip()
+        if not token:
+            continue
+        token = token.replace("sm_", "").replace("compute_", "")
+        token = token.replace("+PTX", "")
+        normalized.append(token)
+    return "1.2" in normalized or "12" in normalized
+
 from setuptools import find_packages, setup
 
 # Package metadata
@@ -100,6 +136,13 @@ def get_extensions():
                 "-D__CUDA_NO_HALF2_OPERATORS__",
             ],
         }
+        if _should_enable_sm120(_TORCH_CUDA_ARCH_LIST):
+            compile_args["nvcc"].extend(
+                [
+                    "-gencode=arch=compute_12,code=sm_12",
+                    "-gencode=arch=compute_12,code=compute_12",
+                ]
+            )
         ext_modules = [CUDAExtension("sam2._C", srcs, extra_compile_args=compile_args)]
     except Exception as e:
         if BUILD_ALLOW_ERRORS:
