@@ -4,9 +4,12 @@
 # 使用清华 PyPI 镜像作为主索引，加速国内环境安装；PyTorch CUDA 轮子仍从官方源获取。
 
 # Core PyTorch stack (CUDA 12.9)
-torch==2.5.1+cu129
-torchvision==0.20.1+cu129
-torchaudio==2.5.1+cu129
+# The PyTorch download index currently exposes CUDA 12.9 wheels starting with the
+# 2.8.0 release train; pin to that family so `pip install` succeeds when using the
+# provided mirror configuration.
+torch==2.8.0+cu129
+torchvision==0.19.0+cu129
+torchaudio==2.8.0+cu129
 # tensordict 0.6.2 ships CUDA 12.6/12.9 compatible wheels
 tensordict==0.6.2
 
