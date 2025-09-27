@@ -4,42 +4,111 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 import os
+import re
+from typing import List, Optional, Tuple
 
 
-def _ensure_default_cuda_arch():
-    """Ensure builds target the legacy sm_120 architecture by default.
-
-    PyTorch respects the ``TORCH_CUDA_ARCH_LIST`` environment variable when
-    generating the nvcc ``-gencode`` flags for both the wheel and any CUDA
-    extensions.  If the variable is not provided we set it explicitly so that
-    downstream build steps emit kernels for ``sm_120`` GPUs.
-    """
+def _ensure_default_cuda_arch() -> str:
+    """Ensure builds cover both legacy sm_120 and CUDA 12.9+ GPUs by default."""
 
     arch_list = os.getenv("TORCH_CUDA_ARCH_LIST")
-    if not arch_list:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "1.2"
-        return "1.2"
-    return arch_list
+    if arch_list:
+        return arch_list
+
+    default_arch = "1.2;12.9"
+    os.environ["TORCH_CUDA_ARCH_LIST"] = default_arch
+    return default_arch
 
 
 _TORCH_CUDA_ARCH_LIST = _ensure_default_cuda_arch()
 
 
-def _should_enable_sm120(arch_list: str) -> bool:
-    """Return True when the CUDA arch list requests sm_120 code generation."""
+def _split_arch_tokens(arch_list: str) -> List[str]:
+    return [token for token in re.split(r"[\s,;]+", arch_list) if token]
 
-    if not arch_list:
-        return False
 
-    normalized = []
-    for token in arch_list.replace(",", " ").split():
-        token = token.strip()
-        if not token:
+def _parse_arch_token(token: str) -> Optional[Tuple[str, bool]]:
+    """Return canonical (major+minor) string and PTX flag for an arch token."""
+
+    wants_ptx = token.endswith("+PTX")
+    if wants_ptx:
+        token = token[:-4]
+
+    original = token
+    if token.startswith("sm_"):
+        token = token[3:]
+    elif token.startswith("compute_"):
+        token = token[8:]
+
+    token = token.strip()
+    if not token:
+        return None
+
+    major: Optional[str] = None
+    minor: Optional[str] = None
+
+    if "." in token:
+        major, minor = token.split(".", 1)
+    elif original.startswith("sm_") or original.startswith("compute_"):
+        if len(token) == 1:
+            major, minor = token, "0"
+        elif len(token) == 2:
+            major, minor = token[0], token[1]
+        else:
+            major, minor = token[:-1], token[-1]
+    else:
+        if len(token) == 1:
+            major, minor = token, "0"
+        elif len(token) == 2:
+            major, minor = token[0], token[1]
+        else:
+            major, minor = token[:-1], token[-1]
+
+    if major is None or minor is None:
+        return None
+
+    try:
+        major_int = int(major)
+        minor_int = int(minor)
+    except ValueError:
+        return None
+
+    canonical = f"{major_int}{minor_int}"
+    return canonical, wants_ptx
+
+
+def _collect_manual_gencode_flags(arch_list: str) -> List[str]:
+    """Build explicit ``-gencode`` flags for legacy or bleeding edge targets."""
+
+    flags: List[str] = []
+    seen: set[Tuple[str, str]] = set()
+
+    for token in _split_arch_tokens(arch_list):
+        parsed = _parse_arch_token(token)
+        if not parsed:
             continue
-        token = token.replace("sm_", "").replace("compute_", "")
-        token = token.replace("+PTX", "")
-        normalized.append(token)
-    return "1.2" in normalized or "12" in normalized
+        arch, wants_ptx = parsed
+
+        # We only override PyTorch's defaults for compute 1.2 legacy GPUs and
+        # the emerging compute 12.x family so CUDA 12.9 toolchains are covered.
+        if arch != "12" and not arch.startswith("12"):
+            continue
+
+        compute = f"compute_{arch}"
+        sm = f"sm_{arch}"
+
+        key_sm = (compute, sm)
+        if key_sm not in seen:
+            flags.append(f"-gencode=arch={compute},code={sm}")
+            seen.add(key_sm)
+
+        if wants_ptx:
+            key_ptx = (compute, compute)
+            if key_ptx not in seen:
+                flags.append(f"-gencode=arch={compute},code={compute}")
+                seen.add(key_ptx)
+
+    return flags
 
 from setuptools import find_packages, setup
 
@@ -136,13 +205,8 @@ def get_extensions():
                 "-D__CUDA_NO_HALF2_OPERATORS__",
             ],
         }
-        if _should_enable_sm120(_TORCH_CUDA_ARCH_LIST):
-            compile_args["nvcc"].extend(
-                [
-                    "-gencode=arch=compute_12,code=sm_12",
-                    "-gencode=arch=compute_12,code=compute_12",
-                ]
-            )
+        manual_gencodes = _collect_manual_gencode_flags(_TORCH_CUDA_ARCH_LIST)
+        compile_args["nvcc"].extend(manual_gencodes)
         ext_modules = [CUDAExtension("sam2._C", srcs, extra_compile_args=compile_args)]
     except Exception as e:
         if BUILD_ALLOW_ERRORS:
